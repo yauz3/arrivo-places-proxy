@@ -47,7 +47,7 @@ function resetDailyIfNeeded() {
 
 function clientIp(req) {
   const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.trim().isNotEmpty) {
+  if (typeof forwarded === 'string' && forwarded.trim().length > 0) {
     return forwarded.split(',')[0].trim();
   }
   return req.ip || 'unknown';

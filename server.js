@@ -10,6 +10,13 @@ app.use(express.json());
 const PORT = Number(process.env.PORT || 8787);
 const GOOGLE_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
+// Maliyet kontrolü
+const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 1000 * 60 * 60 * 12); // 12 saat
+const MAX_RESULTS = Number(process.env.MAX_RESULTS || 10);
+const DAILY_IP_LIMIT = Number(process.env.DAILY_IP_LIMIT || 120);
+const GLOBAL_DAILY_LIMIT = Number(process.env.GLOBAL_DAILY_LIMIT || 1500);
+
+// Daha ucuz / kontrollü field mask. Opening hours çekmiyoruz.
 const FIELD_MASK = [
   'places.id',
   'places.displayName',
@@ -17,9 +24,107 @@ const FIELD_MASK = [
   'places.location',
   'places.primaryType',
   'places.types',
-  'places.businessStatus',
-  'places.regularOpeningHours'
+  'places.businessStatus'
 ].join(',');
+
+const cache = new Map();
+const ipDaily = new Map();
+let globalDayKey = dayKey();
+let globalDailyCount = 0;
+
+function dayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function resetDailyIfNeeded() {
+  const today = dayKey();
+  if (today !== globalDayKey) {
+    globalDayKey = today;
+    globalDailyCount = 0;
+    ipDaily.clear();
+  }
+}
+
+function clientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim().isNotEmpty) {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.ip || 'unknown';
+}
+
+function normalizeText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replaceAll('ı', 'i')
+    .replaceAll('İ', 'i')
+    .replaceAll('ş', 's')
+    .replaceAll('Ş', 's')
+    .replaceAll('ğ', 'g')
+    .replaceAll('Ğ', 'g')
+    .replaceAll('ü', 'u')
+    .replaceAll('Ü', 'u')
+    .replaceAll('ö', 'o')
+    .replaceAll('Ö', 'o')
+    .replaceAll('ç', 'c')
+    .replaceAll('Ç', 'c')
+    .trim();
+}
+
+function roundedCoord(value) {
+  // yaklaşık 110 metre hassasiyet. Cache hit'i artırır.
+  return Number(value).toFixed(3);
+}
+
+function cacheKey({ lat, lng, category, brand, q, radius }) {
+  return [
+    roundedCoord(lat),
+    roundedCoord(lng),
+    category || '',
+    normalizeText(brand),
+    normalizeText(q),
+    Math.round(Number(radius || 5000) / 1000) * 1000
+  ].join('|');
+}
+
+function getCache(key) {
+  const item = cache.get(key);
+  if (!item) return null;
+  if (Date.now() - item.time > CACHE_TTL_MS) {
+    cache.delete(key);
+    return null;
+  }
+  return item.value;
+}
+
+function setCache(key, value) {
+  cache.set(key, { time: Date.now(), value });
+}
+
+function enforceLimits(req, res) {
+  resetDailyIfNeeded();
+
+  if (globalDailyCount >= GLOBAL_DAILY_LIMIT) {
+    res.status(429).json({
+      error: 'Global daily proxy limit reached. Try again tomorrow.'
+    });
+    return false;
+  }
+
+  const ip = clientIp(req);
+  const count = ipDaily.get(ip) || 0;
+
+  if (count >= DAILY_IP_LIMIT) {
+    res.status(429).json({
+      error: 'Daily request limit reached for this client. Try again tomorrow.'
+    });
+    return false;
+  }
+
+  ipDaily.set(ip, count + 1);
+  globalDailyCount += 1;
+  return true;
+}
 
 function requireKey(res) {
   if (!GOOGLE_KEY) {
@@ -31,18 +136,37 @@ function requireKey(res) {
   return true;
 }
 
+function includedTypesForCategory(category) {
+  switch (category) {
+    case 'pharmacy':
+      return ['pharmacy'];
+    case 'market':
+      return ['supermarket', 'grocery_store', 'convenience_store'];
+    case 'cargo':
+      return ['post_office'];
+    case 'gym':
+      return ['gym'];
+    case 'hospital':
+      return ['hospital', 'doctor'];
+    case 'cafe':
+      return ['cafe', 'restaurant'];
+    default:
+      return [];
+  }
+}
+
 function categoryText(category) {
   switch (category) {
     case 'pharmacy':
-      return 'eczane';
+      return 'eczane pharmacy';
     case 'market':
       return 'market supermarket grocery';
     case 'cargo':
-      return 'kargo cargo courier post office';
+      return 'kargo courier post office';
     case 'gym':
       return 'spor salonu fitness gym';
     case 'hospital':
-      return 'hastane acil servis medical hospital clinic';
+      return 'hastane acil servis hospital clinic';
     case 'cafe':
       return 'cafe kahve restaurant';
     default:
@@ -96,30 +220,15 @@ function inferCategory(place, fallbackCategory) {
     return 'market';
   }
 
-  if (
-    primary === 'post_office' ||
-    types.includes('post_office') ||
-    types.includes('moving_company')
-  ) {
-    return 'cargo';
-  }
+  if (primary === 'post_office' || types.includes('post_office')) return 'cargo';
 
-  if (
-    primary === 'gym' ||
-    primary === 'fitness_center' ||
-    types.includes('gym') ||
-    types.includes('fitness_center')
-  ) {
-    return 'gym';
-  }
+  if (primary === 'gym' || types.includes('gym')) return 'gym';
 
   if (
     primary === 'hospital' ||
     primary === 'doctor' ||
-    primary === 'medical_lab' ||
     types.includes('hospital') ||
-    types.includes('doctor') ||
-    types.includes('medical_lab')
+    types.includes('doctor')
   ) {
     return 'hospital';
   }
@@ -127,10 +236,8 @@ function inferCategory(place, fallbackCategory) {
   if (
     primary === 'cafe' ||
     primary === 'restaurant' ||
-    primary === 'coffee_shop' ||
     types.includes('cafe') ||
-    types.includes('restaurant') ||
-    types.includes('coffee_shop')
+    types.includes('restaurant')
   ) {
     return 'cafe';
   }
@@ -145,7 +252,6 @@ function normalizePlace(place, userLat, userLng, fallbackCategory) {
 
   const category = inferCategory(place, fallbackCategory);
   const name = place.displayName?.text || 'Unnamed place';
-  const openNow = place.regularOpeningHours?.openNow;
 
   return {
     externalId: place.id,
@@ -155,46 +261,26 @@ function normalizePlace(place, userLat, userLng, fallbackCategory) {
     category,
     address: place.formattedAddress || '',
     distanceMeters: haversineMeters(userLat, userLng, lat, lng),
-    openingText:
-      typeof openNow === 'boolean' ? (openNow ? 'Açık' : 'Kapalı') : '',
-    isOpen: typeof openNow === 'boolean' ? openNow : null,
+    openingText: '',
+    isOpen: null,
     suggestedRadiusMeters: suggestedRadius(category),
     source: 'google'
   };
 }
 
-function brandQuery(category, brand) {
-  if (brand && brand !== 'hepsi' && brand !== 'all') return brand;
-
-  return categoryText(category);
+function shouldUseTextSearch({ q, brand }) {
+  const query = String(q || '').trim();
+  const brandText = String(brand || '').trim();
+  return query.length > 0 || brandText.length > 0;
 }
 
-app.get('/health', (_, res) => {
-  res.json({ ok: true, service: 'arrivo-places-proxy' });
-});
-
-app.get('/places/search', async (req, res) => {
-  if (!requireKey(res)) return;
-
-  const lat = Number(req.query.lat);
-  const lng = Number(req.query.lng);
-  const category = String(req.query.category || '').trim();
-  const brand = String(req.query.brand || '').trim();
-  const q = String(req.query.q || '').trim();
-  const radius = Math.min(Number(req.query.radius || 5000), 20000);
-
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-    res.status(400).json({ error: 'lat and lng are required numbers.' });
-    return;
-  }
-
-  const textQuery = q || brandQuery(category, brand);
+async function googleNearbySearch({ lat, lng, category, radius }) {
+  const includedTypes = includedTypesForCategory(category);
 
   const body = {
-    textQuery,
     languageCode: 'tr',
     regionCode: 'TR',
-    maxResultCount: 20,
+    maxResultCount: MAX_RESULTS,
     locationRestriction: {
       circle: {
         center: {
@@ -206,19 +292,93 @@ app.get('/places/search', async (req, res) => {
     }
   };
 
-  try {
-    const googleResp = await fetch(
-      'https://places.googleapis.com/v1/places:searchText',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Goog-Api-Key': GOOGLE_KEY,
-          'X-Goog-FieldMask': FIELD_MASK
+  if (includedTypes.length > 0) {
+    body.includedTypes = includedTypes;
+  }
+
+  const resp = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': GOOGLE_KEY,
+      'X-Goog-FieldMask': FIELD_MASK
+    },
+    body: JSON.stringify(body)
+  });
+
+  return resp;
+}
+
+async function googleTextSearch({ lat, lng, category, brand, q, radius }) {
+  const textQuery = String(q || '').trim() || String(brand || '').trim() || categoryText(category);
+
+  const body = {
+    textQuery,
+    languageCode: 'tr',
+    regionCode: 'TR',
+    maxResultCount: MAX_RESULTS,
+    locationRestriction: {
+      circle: {
+        center: {
+          latitude: lat,
+          longitude: lng
         },
-        body: JSON.stringify(body)
+        radius
       }
-    );
+    }
+  };
+
+  const resp = await fetch('https://places.googleapis.com/v1/places:searchText', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': GOOGLE_KEY,
+      'X-Goog-FieldMask': FIELD_MASK
+    },
+    body: JSON.stringify(body)
+  });
+
+  return resp;
+}
+
+app.get('/health', (_, res) => {
+  res.json({
+    ok: true,
+    service: 'arrivo-places-proxy',
+    cacheSize: cache.size,
+    globalDayKey,
+    globalDailyCount
+  });
+});
+
+app.get('/places/search', async (req, res) => {
+  if (!requireKey(res)) return;
+  if (!enforceLimits(req, res)) return;
+
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+  const category = String(req.query.category || '').trim();
+  const brand = String(req.query.brand || '').trim();
+  const q = String(req.query.q || '').trim();
+  const radius = Math.min(Number(req.query.radius || 5000), 10000);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    res.status(400).json({ error: 'lat and lng are required numbers.' });
+    return;
+  }
+
+  const key = cacheKey({ lat, lng, category, brand, q, radius });
+  const cached = getCache(key);
+
+  if (cached) {
+    res.json({ results: cached, cached: true });
+    return;
+  }
+
+  try {
+    const googleResp = shouldUseTextSearch({ q, brand })
+      ? await googleTextSearch({ lat, lng, category, brand, q, radius })
+      : await googleNearbySearch({ lat, lng, category, radius });
 
     const rawText = await googleResp.text();
 
@@ -239,7 +399,8 @@ app.get('/places/search', async (req, res) => {
       .filter(Boolean)
       .sort((a, b) => a.distanceMeters - b.distanceMeters);
 
-    res.json({ results });
+    setCache(key, results);
+    res.json({ results, cached: false });
   } catch (error) {
     res.status(500).json({
       error: 'Proxy search failed.',

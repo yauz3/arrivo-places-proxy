@@ -10,9 +10,9 @@ app.use(express.json());
 const PORT = Number(process.env.PORT || 8787);
 const GOOGLE_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
-const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 1000 * 60 * 60 * 12);
+const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 1000 * 60 * 60 * 6);
 const MAX_RESULTS = Number(process.env.MAX_RESULTS || 20);
-const DAILY_IP_LIMIT = Number(process.env.DAILY_IP_LIMIT || 160);
+const DAILY_IP_LIMIT = Number(process.env.DAILY_IP_LIMIT || 200);
 const GLOBAL_DAILY_LIMIT = Number(process.env.GLOBAL_DAILY_LIMIT || 1500);
 
 const FIELD_MASK = [
@@ -81,7 +81,7 @@ function cacheKey({ lat, lng, category, brand, q, radius }) {
     category || '',
     normalizeText(brand),
     normalizeText(q),
-    Math.round(Number(radius || 10000) / 1000) * 1000
+    Math.round(Number(radius || 20000) / 1000) * 1000
   ].join('|');
 }
 
@@ -98,6 +98,7 @@ function getCache(key) {
 }
 
 function setCache(key, value) {
+  if (!Array.isArray(value) || value.length === 0) return; // boş sonuç cache'leme
   cache.set(key, { time: Date.now(), value });
 }
 
@@ -133,39 +134,82 @@ function requireKey(res) {
   return true;
 }
 
-function includedTypesForCategory(category) {
-  switch (category) {
-    case 'pharmacy':
-      return ['pharmacy'];
-    case 'market':
-      return ['supermarket', 'grocery_store', 'convenience_store', 'store'];
-    case 'cargo':
-      return ['post_office'];
-    case 'gym':
-      return ['gym'];
-    case 'hospital':
-      return ['hospital', 'doctor'];
-    case 'cafe':
-      return ['cafe', 'restaurant'];
-    default:
-      return [];
-  }
-}
-
 function categoryQueries(category) {
   switch (category) {
     case 'pharmacy':
-      return ['eczane', 'nöbetçi eczane', 'pharmacy'];
+      return [
+        'eczane',
+        'pharmacy',
+        'nöbetçi eczane'
+      ];
+
     case 'market':
-      return ['market', 'süpermarket', 'supermarket', 'grocery store', 'bakkal'];
+      return [
+        'market',
+        'süpermarket',
+        'supermarket',
+        'grocery store',
+        'bakkal',
+        'A101',
+        'BİM',
+        'BIM',
+        'Migros',
+        'ŞOK Market',
+        'Sok Market',
+        'CarrefourSA',
+        'Hakmar'
+      ];
+
     case 'cargo':
-      return ['kargo', 'kargo şubesi', 'courier', 'post office', 'posta'];
+      return [
+        'kargo',
+        'kargo şubesi',
+        'cargo',
+        'courier',
+        'post office',
+        'PTT',
+        'PTT Kargo',
+        'Yurtiçi Kargo',
+        'Yurtici Kargo',
+        'MNG Kargo',
+        'Aras Kargo',
+        'Sürat Kargo',
+        'Surat Kargo',
+        'Sendeo'
+      ];
+
     case 'gym':
-      return ['spor salonu', 'fitness', 'gym'];
+      return [
+        'spor salonu',
+        'fitness',
+        'gym',
+        'MacFit',
+        'MACFit',
+        "Gold's Gym",
+        'Golds Gym',
+        'Fitness First'
+      ];
+
     case 'hospital':
-      return ['hastane', 'acil servis', 'hospital', 'clinic'];
+      return [
+        'hastane',
+        'hospital',
+        'acil servis',
+        'clinic',
+        'Devlet Hastanesi',
+        'Medicana',
+        'Medical Park'
+      ];
+
     case 'cafe':
-      return ['cafe', 'kahve', 'restaurant'];
+      return [
+        'cafe',
+        'kahve',
+        'restaurant',
+        'Starbucks',
+        'Kahve Dünyası'
+      ];
+
     default:
       return ['place'];
   }
@@ -180,19 +224,19 @@ function brandQueries(category, brand) {
   if (category === 'market') {
     const variants = [raw];
 
-    if (n === 'bim' || n === 'bim') variants.push('BIM', 'BİM market', 'BIM market');
-    if (n === 'sok') variants.push('ŞOK', 'Şok Market', 'Sok market');
-    if (n === 'a101') variants.push('A101 market', 'A 101', 'A101 supermarket');
-    if (n === 'migros') variants.push('Migros market', 'Migros supermarket');
-    if (n === 'carrefoursa') variants.push('CarrefourSA market', 'Carrefour SA');
-    if (n === 'hakmar') variants.push('Hakmar market', 'Hakmar Express');
+    if (n === 'a101') variants.push('A101 market', 'A 101', 'A101 supermarket', 'A101 mağaza');
+    if (n === 'bim') variants.push('BİM', 'BIM', 'BİM market', 'BIM market');
+    if (n === 'sok') variants.push('ŞOK', 'Şok Market', 'Sok Market', 'ŞOK market');
+    if (n === 'migros') variants.push('Migros market', 'Migros supermarket', 'Migros mağaza');
+    if (n === 'carrefoursa') variants.push('CarrefourSA', 'Carrefour SA', 'CarrefourSA market');
+    if (n === 'hakmar') variants.push('Hakmar', 'Hakmar Express', 'Hakmar market');
 
-    variants.push(`${raw} market`, `${raw} süpermarket`, `${raw} supermarket`);
+    variants.push(`${raw} market`, `${raw} süpermarket`, `${raw} supermarket`, `${raw} mağaza`);
     return [...new Set(variants)];
   }
 
   if (category === 'cargo') {
-    const variants = [raw, `${raw} kargo`, `${raw} cargo`, `${raw} şube`];
+    const variants = [raw, `${raw} kargo`, `${raw} cargo`, `${raw} şube`, `${raw} şubesi`];
 
     if (n.includes('ptt')) variants.push('PTT', 'PTT Kargo', 'PTT şubesi', 'post office');
     if (n.includes('yurtici')) variants.push('Yurtiçi Kargo', 'Yurtici Kargo');
@@ -220,7 +264,8 @@ function brandQueries(category, brand) {
       `${raw} hastane`,
       `${raw} hospital`,
       `${raw} acil`,
-      `${raw} acil servis`
+      `${raw} acil servis`,
+      `${raw} klinik`
     ];
   }
 
@@ -259,10 +304,12 @@ function inferCategory(place, fallbackCategory) {
     primary === 'grocery_store' ||
     primary === 'convenience_store' ||
     primary === 'store' ||
+    primary === 'shopping_mall' ||
     types.includes('supermarket') ||
     types.includes('grocery_store') ||
     types.includes('convenience_store') ||
-    types.includes('store')
+    types.includes('store') ||
+    types.includes('shopping_mall')
   ) {
     return 'market';
   }
@@ -314,37 +361,7 @@ function normalizePlace(place, userLat, userLng, fallbackCategory) {
   };
 }
 
-async function googleNearbySearch({ lat, lng, category, radius }) {
-  const includedTypes = includedTypesForCategory(category);
-
-  const body = {
-    languageCode: 'tr',
-    regionCode: 'TR',
-    maxResultCount: MAX_RESULTS,
-    locationRestriction: {
-      circle: {
-        center: { latitude: lat, longitude: lng },
-        radius
-      }
-    }
-  };
-
-  if (includedTypes.length > 0) {
-    body.includedTypes = includedTypes;
-  }
-
-  return fetch('https://places.googleapis.com/v1/places:searchNearby', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Goog-Api-Key': GOOGLE_KEY,
-      'X-Goog-FieldMask': FIELD_MASK
-    },
-    body: JSON.stringify(body)
-  });
-}
-
-async function googleTextSearch({ lat, lng, textQuery, radius, useBias = false }) {
+async function googleTextSearch({ lat, lng, textQuery, radius, useBias }) {
   const circle = {
     center: { latitude: lat, longitude: lng },
     radius
@@ -363,7 +380,7 @@ async function googleTextSearch({ lat, lng, textQuery, radius, useBias = false }
     body.locationRestriction = { circle };
   }
 
-  return fetch('https://places.googleapis.com/v1/places:searchText', {
+  const response = await fetch('https://places.googleapis.com/v1/places:searchText', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -372,26 +389,27 @@ async function googleTextSearch({ lat, lng, textQuery, radius, useBias = false }
     },
     body: JSON.stringify(body)
   });
-}
 
-async function parseGoogleResponse(resp) {
-  const rawText = await resp.text();
+  const rawText = await response.text();
 
-  if (!resp.ok) {
+  if (!response.ok) {
     return {
       ok: false,
-      status: resp.status,
+      status: response.status,
       error: rawText,
-      places: []
+      places: [],
+      query: textQuery
     };
   }
 
   const decoded = JSON.parse(rawText);
+
   return {
     ok: true,
-    status: resp.status,
+    status: response.status,
     error: '',
-    places: decoded.places || []
+    places: decoded.places || [],
+    query: textQuery
   };
 }
 
@@ -414,10 +432,10 @@ function matchesBrandSoft(place, brand) {
 
   if (p.includes(b)) return true;
 
-  if (b === 'bim' && (p.includes('bim') || p.includes('bim market'))) return true;
+  if (b === 'bim' && p.includes('bim')) return true;
   if (b === 'sok' && (p.includes('sok') || p.includes('şok'))) return true;
   if (b === 'a101' && (p.includes('a101') || p.includes('a 101'))) return true;
-  if (b === 'carrefoursa' && (p.includes('carrefour') || p.includes('carrefoursa'))) return true;
+  if (b === 'carrefoursa' && p.includes('carrefour')) return true;
   if (b === 'yurtici' && (p.includes('yurtici') || p.includes('yurtiçi'))) return true;
   if (b === 'surat' && (p.includes('surat') || p.includes('sürat'))) return true;
 
@@ -434,6 +452,11 @@ app.get('/health', (_, res) => {
   });
 });
 
+app.get('/cache/clear', (_, res) => {
+  cache.clear();
+  res.json({ ok: true, cacheSize: cache.size });
+});
+
 app.get('/places/search', async (req, res) => {
   if (!requireKey(res)) return;
   if (!enforceLimits(req, res)) return;
@@ -443,7 +466,7 @@ app.get('/places/search', async (req, res) => {
   const category = String(req.query.category || '').trim();
   const brand = String(req.query.brand || '').trim();
   const q = String(req.query.q || '').trim();
-  const radius = Math.min(Number(req.query.radius || 10000), 10000);
+  const radius = Math.min(Number(req.query.radius || 20000), 20000);
 
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
     res.status(400).json({ error: 'lat and lng are required numbers.' });
@@ -459,73 +482,50 @@ app.get('/places/search', async (req, res) => {
   }
 
   try {
-    const normalizedResults = [];
-    let lastError = null;
-
     const queries = q
       ? [q]
       : brand
         ? brandQueries(category, brand)
         : categoryQueries(category);
 
-    // Kategori seçimi için önce Nearby dene.
-    if (!brand && !q) {
-      const nearbyParsed = await parseGoogleResponse(
-        await googleNearbySearch({ lat, lng, category, radius })
-      );
+    const calls = [];
 
-      if (nearbyParsed.ok) {
-        for (const place of nearbyParsed.places) {
-          const normalized = normalizePlace(place, lat, lng, category);
-          if (normalized) normalizedResults.push(normalized);
-        }
-      } else {
-        lastError = {
-          status: nearbyParsed.status,
-          details: nearbyParsed.error
-        };
-      }
-    }
-
-    // Text Search varyantları.
     for (const queryText of queries) {
-      if (normalizedResults.length >= MAX_RESULTS) break;
-
-      for (const useBias of [false, true]) {
-        const parsed = await parseGoogleResponse(
-          await googleTextSearch({
-            lat,
-            lng,
-            textQuery: queryText,
-            radius,
-            useBias
-          })
-        );
-
-        if (!parsed.ok) {
-          lastError = {
-            status: parsed.status,
-            details: parsed.error
-          };
-          continue;
-        }
-
-        for (const place of parsed.places) {
-          const normalized = normalizePlace(place, lat, lng, category);
-          if (normalized) normalizedResults.push(normalized);
-        }
-
-        if (normalizedResults.length > 0) break;
-      }
-
-      if (normalizedResults.length > 0) break;
+      calls.push(googleTextSearch({ lat, lng, textQuery: queryText, radius, useBias: false }));
+      calls.push(googleTextSearch({ lat, lng, textQuery: queryText, radius, useBias: true }));
     }
 
-    if (normalizedResults.length === 0 && lastError) {
-      res.status(lastError.status).json({
+    const settled = await Promise.all(calls);
+    const normalizedResults = [];
+    const errors = [];
+
+    for (const parsed of settled) {
+      if (!parsed.ok) {
+        errors.push({
+          query: parsed.query,
+          status: parsed.status,
+          error: parsed.error
+        });
+        continue;
+      }
+
+      for (const place of parsed.places) {
+        const normalized = normalizePlace(place, lat, lng, category);
+        if (normalized) normalizedResults.push(normalized);
+      }
+    }
+
+    if (normalizedResults.length === 0 && errors.length > 0) {
+      res.status(errors[0].status).json({
         error: 'Google Places request failed.',
-        status: lastError.status,
-        details: lastError.details
+        status: errors[0].status,
+        details: errors[0].error,
+        debug: {
+          category,
+          brand,
+          q,
+          queriesTried: queries
+        }
       });
       return;
     }
@@ -537,8 +537,6 @@ app.get('/places/search', async (req, res) => {
     if (brand) {
       const brandMatched = results.filter((item) => matchesBrandSoft(item, brand));
 
-      // Eğer Google marka ismini farklı döndürdüyse tamamen boş bırakmamak için fallback:
-      // marka eşleşmesi yoksa yakın sonuçları yine döndür.
       if (brandMatched.length > 0) {
         results = brandMatched;
       }
@@ -547,6 +545,7 @@ app.get('/places/search', async (req, res) => {
     results = results.slice(0, MAX_RESULTS);
 
     setCache(key, results);
+
     res.json({
       results,
       cached: false,
@@ -554,7 +553,8 @@ app.get('/places/search', async (req, res) => {
         category,
         brand,
         q,
-        queriesTried: queries
+        queriesTried: queries,
+        rawResultCount: normalizedResults.length
       }
     });
   } catch (error) {

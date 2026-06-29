@@ -11,8 +11,8 @@ const PORT = Number(process.env.PORT || 8787);
 const GOOGLE_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 1000 * 60 * 60 * 12);
-const MAX_RESULTS = Number(process.env.MAX_RESULTS || 15);
-const DAILY_IP_LIMIT = Number(process.env.DAILY_IP_LIMIT || 120);
+const MAX_RESULTS = Number(process.env.MAX_RESULTS || 20);
+const DAILY_IP_LIMIT = Number(process.env.DAILY_IP_LIMIT || 160);
 const GLOBAL_DAILY_LIMIT = Number(process.env.GLOBAL_DAILY_LIMIT || 1500);
 
 const FIELD_MASK = [
@@ -66,6 +66,7 @@ function normalizeText(value) {
     .replaceAll('Ö', 'o')
     .replaceAll('ç', 'c')
     .replaceAll('Ç', 'c')
+    .replaceAll('’', "'")
     .trim();
 }
 
@@ -87,10 +88,12 @@ function cacheKey({ lat, lng, category, brand, q, radius }) {
 function getCache(key) {
   const item = cache.get(key);
   if (!item) return null;
+
   if (Date.now() - item.time > CACHE_TTL_MS) {
     cache.delete(key);
     return null;
   }
+
   return item.value;
 }
 
@@ -116,6 +119,7 @@ function enforceLimits(req, res) {
 
   ipDaily.set(ip, count + 1);
   globalDailyCount += 1;
+
   return true;
 }
 
@@ -134,7 +138,7 @@ function includedTypesForCategory(category) {
     case 'pharmacy':
       return ['pharmacy'];
     case 'market':
-      return ['supermarket', 'grocery_store', 'convenience_store'];
+      return ['supermarket', 'grocery_store', 'convenience_store', 'store'];
     case 'cargo':
       return ['post_office'];
     case 'gym':
@@ -148,46 +152,86 @@ function includedTypesForCategory(category) {
   }
 }
 
-function categoryText(category) {
+function categoryQueries(category) {
   switch (category) {
     case 'pharmacy':
-      return 'eczane pharmacy nöbetçi eczane';
+      return ['eczane', 'nöbetçi eczane', 'pharmacy'];
     case 'market':
-      return 'market supermarket grocery bakkal';
+      return ['market', 'süpermarket', 'supermarket', 'grocery store', 'bakkal'];
     case 'cargo':
-      return 'kargo courier post office';
+      return ['kargo', 'kargo şubesi', 'courier', 'post office', 'posta'];
     case 'gym':
-      return 'spor salonu fitness gym';
+      return ['spor salonu', 'fitness', 'gym'];
     case 'hospital':
-      return 'hastane acil servis hospital clinic';
+      return ['hastane', 'acil servis', 'hospital', 'clinic'];
     case 'cafe':
-      return 'cafe kahve restaurant';
+      return ['cafe', 'kahve', 'restaurant'];
     default:
-      return 'place';
+      return ['place'];
   }
 }
 
-function brandText(category, brand) {
-  const b = String(brand || '').trim();
-  if (!b) return categoryText(category);
+function brandQueries(category, brand) {
+  const raw = String(brand || '').trim();
+  if (!raw) return categoryQueries(category);
 
-  switch (category) {
-    case 'market':
-      return `${b} market`;
-    case 'cargo':
-      return `${b} kargo`;
-    case 'gym':
-      return `${b} spor salonu fitness`;
-    case 'hospital':
-      return `${b} hastane`;
-    case 'pharmacy':
-      return `${b} eczane`;
-    default:
-      return b;
+  const n = normalizeText(raw);
+
+  if (category === 'market') {
+    const variants = [raw];
+
+    if (n === 'bim' || n === 'bim') variants.push('BIM', 'BİM market', 'BIM market');
+    if (n === 'sok') variants.push('ŞOK', 'Şok Market', 'Sok market');
+    if (n === 'a101') variants.push('A101 market', 'A 101', 'A101 supermarket');
+    if (n === 'migros') variants.push('Migros market', 'Migros supermarket');
+    if (n === 'carrefoursa') variants.push('CarrefourSA market', 'Carrefour SA');
+    if (n === 'hakmar') variants.push('Hakmar market', 'Hakmar Express');
+
+    variants.push(`${raw} market`, `${raw} süpermarket`, `${raw} supermarket`);
+    return [...new Set(variants)];
   }
+
+  if (category === 'cargo') {
+    const variants = [raw, `${raw} kargo`, `${raw} cargo`, `${raw} şube`];
+
+    if (n.includes('ptt')) variants.push('PTT', 'PTT Kargo', 'PTT şubesi', 'post office');
+    if (n.includes('yurtici')) variants.push('Yurtiçi Kargo', 'Yurtici Kargo');
+    if (n.includes('mng')) variants.push('MNG Kargo');
+    if (n.includes('aras')) variants.push('Aras Kargo');
+    if (n.includes('surat')) variants.push('Sürat Kargo', 'Surat Kargo');
+    if (n.includes('sendeo')) variants.push('Sendeo');
+
+    return [...new Set(variants)];
+  }
+
+  if (category === 'gym') {
+    const variants = [raw, `${raw} gym`, `${raw} fitness`, `${raw} spor salonu`];
+
+    if (n.includes('gold')) variants.push("Gold's Gym", 'Golds Gym');
+    if (n.includes('macfit')) variants.push('MacFit', 'MACFit');
+    if (n.includes('fitness first')) variants.push('Fitness First');
+
+    return [...new Set(variants)];
+  }
+
+  if (category === 'hospital') {
+    return [
+      raw,
+      `${raw} hastane`,
+      `${raw} hospital`,
+      `${raw} acil`,
+      `${raw} acil servis`
+    ];
+  }
+
+  if (category === 'pharmacy') {
+    return [raw, `${raw} eczane`, `${raw} pharmacy`];
+  }
+
+  return [raw];
 }
 
-function suggestedRadius(category) {
+function suggestedRadius() {
   return 500;
 }
 
@@ -300,18 +344,7 @@ async function googleNearbySearch({ lat, lng, category, radius }) {
   });
 }
 
-async function googleTextSearch({
-  lat,
-  lng,
-  category,
-  brand,
-  q,
-  radius,
-  useBias = false
-}) {
-  const textQuery =
-    String(q || '').trim() || brandText(category, brand) || categoryText(category);
-
+async function googleTextSearch({ lat, lng, textQuery, radius, useBias = false }) {
   const circle = {
     center: { latitude: lat, longitude: lng },
     radius
@@ -364,11 +397,31 @@ async function parseGoogleResponse(resp) {
 
 function uniquePlaces(places) {
   const map = new Map();
+
   for (const place of places) {
     if (!place || !place.externalId) continue;
     map.set(place.externalId, place);
   }
+
   return [...map.values()];
+}
+
+function matchesBrandSoft(place, brand) {
+  if (!brand) return true;
+
+  const p = normalizeText(`${place.name} ${place.address}`);
+  const b = normalizeText(brand);
+
+  if (p.includes(b)) return true;
+
+  if (b === 'bim' && (p.includes('bim') || p.includes('bim market'))) return true;
+  if (b === 'sok' && (p.includes('sok') || p.includes('şok'))) return true;
+  if (b === 'a101' && (p.includes('a101') || p.includes('a 101'))) return true;
+  if (b === 'carrefoursa' && (p.includes('carrefour') || p.includes('carrefoursa'))) return true;
+  if (b === 'yurtici' && (p.includes('yurtici') || p.includes('yurtiçi'))) return true;
+  if (b === 'surat' && (p.includes('surat') || p.includes('sürat'))) return true;
+
+  return false;
 }
 
 app.get('/health', (_, res) => {
@@ -407,44 +460,62 @@ app.get('/places/search', async (req, res) => {
 
   try {
     const normalizedResults = [];
-
-    const calls = [];
-
-    // Marka veya metin varsa güçlü Text Search.
-    if (brand || q) {
-      calls.push(
-        googleTextSearch({ lat, lng, category, brand, q, radius, useBias: false })
-      );
-      calls.push(
-        googleTextSearch({ lat, lng, category, brand, q, radius, useBias: true })
-      );
-    } else {
-      // Kategori seçimi: önce Nearby, sonra Text fallback.
-      calls.push(googleNearbySearch({ lat, lng, category, radius }));
-      calls.push(
-        googleTextSearch({ lat, lng, category, brand: '', q: categoryText(category), radius, useBias: false })
-      );
-      calls.push(
-        googleTextSearch({ lat, lng, category, brand: '', q: categoryText(category), radius, useBias: true })
-      );
-    }
-
     let lastError = null;
 
-    for (const callPromise of calls) {
-      const parsed = await parseGoogleResponse(await callPromise);
+    const queries = q
+      ? [q]
+      : brand
+        ? brandQueries(category, brand)
+        : categoryQueries(category);
 
-      if (!parsed.ok) {
+    // Kategori seçimi için önce Nearby dene.
+    if (!brand && !q) {
+      const nearbyParsed = await parseGoogleResponse(
+        await googleNearbySearch({ lat, lng, category, radius })
+      );
+
+      if (nearbyParsed.ok) {
+        for (const place of nearbyParsed.places) {
+          const normalized = normalizePlace(place, lat, lng, category);
+          if (normalized) normalizedResults.push(normalized);
+        }
+      } else {
         lastError = {
-          status: parsed.status,
-          details: parsed.error
+          status: nearbyParsed.status,
+          details: nearbyParsed.error
         };
-        continue;
       }
+    }
 
-      for (const place of parsed.places) {
-        const normalized = normalizePlace(place, lat, lng, category);
-        if (normalized) normalizedResults.push(normalized);
+    // Text Search varyantları.
+    for (const queryText of queries) {
+      if (normalizedResults.length >= MAX_RESULTS) break;
+
+      for (const useBias of [false, true]) {
+        const parsed = await parseGoogleResponse(
+          await googleTextSearch({
+            lat,
+            lng,
+            textQuery: queryText,
+            radius,
+            useBias
+          })
+        );
+
+        if (!parsed.ok) {
+          lastError = {
+            status: parsed.status,
+            details: parsed.error
+          };
+          continue;
+        }
+
+        for (const place of parsed.places) {
+          const normalized = normalizePlace(place, lat, lng, category);
+          if (normalized) normalizedResults.push(normalized);
+        }
+
+        if (normalizedResults.length > 0) break;
       }
 
       if (normalizedResults.length > 0) break;
@@ -459,13 +530,33 @@ app.get('/places/search', async (req, res) => {
       return;
     }
 
-    const results = uniquePlaces(normalizedResults)
+    let results = uniquePlaces(normalizedResults)
       .filter((item) => item.distanceMeters <= radius)
-      .sort((a, b) => a.distanceMeters - b.distanceMeters)
-      .slice(0, MAX_RESULTS);
+      .sort((a, b) => a.distanceMeters - b.distanceMeters);
+
+    if (brand) {
+      const brandMatched = results.filter((item) => matchesBrandSoft(item, brand));
+
+      // Eğer Google marka ismini farklı döndürdüyse tamamen boş bırakmamak için fallback:
+      // marka eşleşmesi yoksa yakın sonuçları yine döndür.
+      if (brandMatched.length > 0) {
+        results = brandMatched;
+      }
+    }
+
+    results = results.slice(0, MAX_RESULTS);
 
     setCache(key, results);
-    res.json({ results, cached: false });
+    res.json({
+      results,
+      cached: false,
+      debug: {
+        category,
+        brand,
+        q,
+        queriesTried: queries
+      }
+    });
   } catch (error) {
     res.status(500).json({
       error: 'Proxy search failed.',
